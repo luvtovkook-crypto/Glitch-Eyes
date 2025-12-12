@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as faceMesh from '@mediapipe/face_mesh';
-import * as cam from '@mediapipe/camera_utils';
 import { 
   calculateEAR, 
   LEFT_EYE_INDICES, 
@@ -30,6 +29,7 @@ export const MirrorCanvas: React.FC = () => {
   
   const [isLoaded, setIsLoaded] = useState(false);
   const [permissionError, setPermissionError] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
   const [fps, setFps] = useState(0);
 
   const sceneParamsRef = useRef<SceneParams>(generateNewScene());
@@ -38,23 +38,23 @@ export const MirrorCanvas: React.FC = () => {
   const blinkCooldownRef = useRef(0);
   const frameCountRef = useRef(0);
   const lastTimeRef = useRef(0);
-  // Removed hueShiftRef to rely on strict palettes
-  const resetFlashRef = useRef(0); // Track animation intensity for scramble feedback
+  const resetFlashRef = useRef(0);
+  
+  // Refs for loop control
+  const faceMeshRef = useRef<any>(null);
+  const animationFrameId = useRef<number | null>(null);
+  const isMountedRef = useRef(true);
 
   useEffect(() => {
-    if (!videoRef.current || !canvasRef.current) return;
-
-    const initMediaPipe = async () => {
+    isMountedRef.current = true;
+    
+    const initSystem = async () => {
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const fmAny = faceMesh as any;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const camAny = cam as any;
-
         const FaceMeshClass = fmAny.FaceMesh || fmAny.default?.FaceMesh || fmAny.default;
-        const CameraClass = camAny.Camera || camAny.default?.Camera || camAny.default;
 
-        if (!FaceMeshClass || !CameraClass) {
+        if (!FaceMeshClass) {
             throw new Error("Failed to load MediaPipe modules");
         }
 
@@ -70,41 +70,100 @@ export const MirrorCanvas: React.FC = () => {
         });
 
         faceMeshClient.onResults(onResults);
+        faceMeshRef.current = faceMeshClient;
 
-        if (videoRef.current) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const camera = new CameraClass(videoRef.current, {
-            onFrame: async () => {
-              if (videoRef.current) {
-                await faceMeshClient.send({ image: videoRef.current });
-              }
-            },
-            width: 1280,
-            height: 720,
-          });
-
-          await camera.start();
-          setIsLoaded(true);
+        // Try to start camera immediately
+        if (isMountedRef.current) {
+            startCamera();
         }
-      } catch (err) {
-        console.error("MediaPipe Init Error:", err);
-        setPermissionError(true);
+
+      } catch (err: any) {
+        console.error("System Init Error:", err);
+        if (isMountedRef.current) {
+            setPermissionError(true);
+            setErrorMsg(err.message || 'Initialization Failed');
+        }
       }
     };
 
-    initMediaPipe();
+    initSystem();
 
     return () => {
+      isMountedRef.current = false;
+      if (animationFrameId.current) cancelAnimationFrame(animationFrameId.current);
       if (videoRef.current && videoRef.current.srcObject) {
          const stream = videoRef.current.srcObject as MediaStream;
          stream.getTracks().forEach(track => track.stop());
+      }
+      if (faceMeshRef.current) {
+          faceMeshRef.current.close();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const startCamera = async () => {
+      if (!isMountedRef.current) return;
+      
+      setPermissionError(false);
+      setErrorMsg('');
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setPermissionError(true);
+          setErrorMsg("Browser API Unavailable");
+          return;
+      }
+
+      try {
+          // Simplified constraints for maximum compatibility
+          // Removed specific resolution requirements that might cause issues
+          const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { facingMode: 'user' },
+            audio: false 
+          });
+
+          if (!isMountedRef.current) {
+              stream.getTracks().forEach(t => t.stop());
+              return;
+          }
+
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            // Use onloadeddata to ensure we have frame data available
+            videoRef.current.onloadeddata = () => {
+                if (!isMountedRef.current) return;
+                videoRef.current?.play().catch(e => console.warn("Video play interrupted", e));
+                setIsLoaded(true);
+                processVideo();
+            };
+          }
+      } catch (err: any) {
+          console.error("Camera Permission Error:", err);
+          if (isMountedRef.current) {
+              setPermissionError(true);
+              setErrorMsg(err.name === 'NotAllowedError' ? 'Permission Denied' : err.message);
+          }
+      }
+  };
+
+  const processVideo = async () => {
+      if (!isMountedRef.current) return;
+      if (!videoRef.current || !faceMeshRef.current) return;
+      
+      // Only process if enough data is available and video is playing
+      if (videoRef.current.readyState >= 2 && !videoRef.current.paused && !videoRef.current.ended) {
+          try {
+            await faceMeshRef.current.send({ image: videoRef.current });
+          } catch (e) {
+            // Drop frame silently on error
+          }
+      }
+      
+      // Continue loop
+      animationFrameId.current = requestAnimationFrame(processVideo);
+  };
+
   const resetScene = useCallback(() => {
-    // Trigger reset animation and regenerate scene parameters
     sceneParamsRef.current = generateNewScene();
     resetFlashRef.current = 1.0; 
   }, []);
@@ -145,6 +204,7 @@ export const MirrorCanvas: React.FC = () => {
   };
 
   const onResults = async (results: faceMesh.Results) => {
+    if (!isMountedRef.current) return;
     const canvas = canvasRef.current;
     const video = videoRef.current;
     if (!canvas || !video) return;
@@ -160,7 +220,6 @@ export const MirrorCanvas: React.FC = () => {
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
 
-    // Logic
     if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
       const landmarks = results.multiFaceLandmarks[0];
       const nose = landmarks[HEAD_NOSE_INDEX];
@@ -196,7 +255,7 @@ export const MirrorCanvas: React.FC = () => {
             }
         }
       } catch (e) {
-          console.error("Bitmap extraction failed", e);
+          // Bitmap extraction failed
       }
     } else {
         targetHeadPosRef.current = { x: 0.5, y: 0.5 };
@@ -220,26 +279,21 @@ export const MirrorCanvas: React.FC = () => {
     const parallaxX = (head.x - 0.5) * width;
     const parallaxY = (head.y - 0.5) * height;
 
-    // Fixed high blur for the background to maintain the "moody void" atmosphere consistently
     const blurRadius = 15;
 
-    // --- 1. Background Layer: Psychedelic Blur ---
+    // --- 1. Background Layer ---
     ctx.save();
-    // Draw the raw video feed scaled up slightly to cover edges
     ctx.filter = `blur(${blurRadius}px) grayscale(100%) contrast(150%) brightness(60%)`;
     ctx.drawImage(videoElement, -50, -50, width + 100, height + 100);
     
-    // Add a dark overlay to make it a "void"
     ctx.filter = 'none';
     ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
     ctx.fillRect(0, 0, width, height);
     
-    // Scanline grid effect in background
     ctx.strokeStyle = params.secondaryColor;
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.15;
     const gridSize = 100;
-    // Parallax grid
     const gridOffsetX = parallaxX * 0.1;
     const gridOffsetY = parallaxY * 0.1;
     
@@ -255,7 +309,7 @@ export const MirrorCanvas: React.FC = () => {
     ctx.stroke();
     ctx.restore();
 
-    // --- 2. Calculate Shape Positions (Pre-pass) ---
+    // --- 2. Calculate Shape Positions ---
     const renderedShapes: RenderedShape[] = [];
 
     params.shapes.forEach((shape) => {
@@ -264,8 +318,6 @@ export const MirrorCanvas: React.FC = () => {
         const frameData = historyRef.current[historyIndex];
         if (!frameData) return;
 
-        // Depth logic: closer items (bigger scale) move more
-        // Drift logic: shapes drift based on gaze/head pos and glitch intensity
         const depth = shape.scale * 0.5; 
         const gazeDriftX = (head.x - 0.5) * width * 0.4 * shape.glitchIntensity;
         const gazeDriftY = (head.y - 0.5) * height * 0.4 * shape.glitchIntensity;
@@ -277,19 +329,17 @@ export const MirrorCanvas: React.FC = () => {
         renderedShapes.push({ x: centerX, y: centerY, size, shape });
     });
 
-    // --- 3. Draw Connections (Web Effect) ---
+    // --- 3. Draw Connections ---
     ctx.save();
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
     ctx.lineWidth = 1;
     
-    // Connect each shape to nearby shapes
     for (let i = 0; i < renderedShapes.length; i++) {
         for (let j = i + 1; j < renderedShapes.length; j++) {
             const s1 = renderedShapes[i];
             const s2 = renderedShapes[j];
             const d = distance({x: s1.x, y: s1.y}, {x: s2.x, y: s2.y});
             
-            // Connection threshold based on canvas size
             if (d < Math.min(width, height) * 0.4) {
                 const opacity = 1 - (d / (Math.min(width, height) * 0.4));
                 ctx.beginPath();
@@ -303,26 +353,21 @@ export const MirrorCanvas: React.FC = () => {
     ctx.restore();
 
 
-    // --- 4. Draw Shapes & UI Overlays (with Trails) ---
+    // --- 4. Draw Shapes & UI Overlays ---
     renderedShapes.forEach((item) => {
         const { x, y, size, shape } = item;
         
-        // Retrieve Image
         const historyIndex = Math.min(shape.delayFrames, historyRef.current.length - 1);
         const frameData = historyRef.current[historyIndex];
         const useLeftEye = shape.id.charCodeAt(0) % 2 === 0;
         const eyeImg = useLeftEye ? frameData.leftEye.image : frameData.rightEye.image;
         if (!eyeImg) return;
 
-        const trailCount = 2; // Number of echo/trail frames
-        // Render from back (trail) to front (main)
+        const trailCount = 2; 
         for (let k = trailCount; k >= 0; k--) {
             const isMain = k === 0;
             const isTrail = !isMain;
 
-            // Trail Offset Logic:
-            // Trails drag behind the movement. If parallax moves shape right (+), trail is left (-).
-            // We use glitchIntensity to exaggerate the trail for some shapes.
             const lagIntensity = 0.08 * k * (0.8 + shape.glitchIntensity);
             const trailX = isMain ? 0 : -(parallaxX * lagIntensity);
             const trailY = isMain ? 0 : -(parallaxY * lagIntensity);
@@ -330,46 +375,30 @@ export const MirrorCanvas: React.FC = () => {
             ctx.save();
             ctx.translate(x + trailX, y + trailY);
             
-            // --- FLICKER & OPACITY LOGIC ---
             let alpha = isMain ? 1.0 : (0.4 / (k + 0.5));
-            
-            // Random instability/flicker
-            // Trails are more unstable than the main shape
             const instability = shape.glitchIntensity;
             const flickerChance = isTrail ? 0.25 : 0.02;
             
             if (Math.random() < flickerChance + (instability * 0.1)) {
-                // Randomly dip opacity to simulate loose connection/bad signal
                 alpha *= (0.2 + Math.random() * 0.7);
-                
-                // Occasional drop to near-zero for trails
                 if (isTrail && Math.random() > 0.8) alpha *= 0.1;
             }
             
             ctx.globalAlpha = alpha;
 
-            // Micro-jitter (Horizontal tearing)
             if (Math.random() < 0.05 + (instability * 0.05)) {
                  const jitter = (Math.random() - 0.5) * 6 * instability;
                  ctx.translate(jitter, 0);
             }
 
-            // Removed Global Hue Rotation to respect Palette
-            // We can add a very subtle static color offset for trails if needed, 
-            // but pure opacity looks cleaner for high-contrast styles.
-
-            // --- Render Eye Image ---
             ctx.save();
             ctx.beginPath();
             ctx.rect(-size/2, -size/2, size, size);
             ctx.clip();
 
-            // Draw Eye (Grayscale or High Contrast Filtered)
             ctx.drawImage(eyeImg, -size/2, -size/2, size, size);
             
-            // Glitch / Color Tint
             ctx.globalCompositeOperation = 'overlay';
-            // Occasional color flash for unstable trail frames
             if (isTrail && Math.random() < 0.05) {
                  ctx.fillStyle = '#FFFFFF';
             } else {
@@ -377,45 +406,36 @@ export const MirrorCanvas: React.FC = () => {
             }
             ctx.fillRect(-size/2, -size/2, size, size);
 
-            // Scanlines on eye
             ctx.globalCompositeOperation = 'source-over';
             ctx.fillStyle = 'rgba(0,0,0,0.3)';
             for(let ly = -size/2; ly < size/2; ly += 3) {
                 ctx.fillRect(-size/2, ly, size, 1);
             }
-            ctx.restore(); // End Image Clip
+            ctx.restore(); 
 
-            // --- Render Borders ---
             ctx.strokeStyle = shape.color;
             ctx.lineWidth = isMain ? 2 : 1;
             ctx.strokeRect(-size/2, -size/2, size, size);
 
-            // --- UI Text (Main only) ---
             if (isMain) {
                 ctx.fillStyle = shape.color;
                 ctx.font = '10px monospace';
                 ctx.shadowColor = shape.color;
                 ctx.shadowBlur = 4;
-
-                // ID Label (Top Left)
                 ctx.fillText(`ID_${shape.id.substring(0,2).toUpperCase()}`, -size/2, -size/2 - 6);
                 
-                // Time Label (Top Right)
                 const timeDelay = (shape.delayFrames * 16.6 / 1000).toFixed(2);
                 const tText = `T-${timeDelay}s`;
                 const tWidth = ctx.measureText(tText).width;
                 ctx.fillText(tText, size/2 - tWidth, -size/2 - 6);
 
-                // Decor corners
                 const cornerSize = 10;
                 ctx.lineWidth = 3;
-                // Top Left
                 ctx.beginPath();
                 ctx.moveTo(-size/2, -size/2 + cornerSize);
                 ctx.lineTo(-size/2, -size/2);
                 ctx.lineTo(-size/2 + cornerSize, -size/2);
                 ctx.stroke();
-                // Bottom Right
                 ctx.beginPath();
                 ctx.moveTo(size/2, size/2 - cornerSize);
                 ctx.lineTo(size/2, size/2);
@@ -423,26 +443,23 @@ export const MirrorCanvas: React.FC = () => {
                 ctx.stroke();
             }
 
-            ctx.restore(); // End Parent Translate
+            ctx.restore(); 
         }
     });
 
-    // --- 5. Reset Scramble Feedback (Blink Action) ---
+    // --- 5. Reset Scramble Feedback ---
     if (resetFlashRef.current > 0.001) {
         ctx.save();
         const intensity = resetFlashRef.current;
         
-        // Flash overlay (additive)
         ctx.globalCompositeOperation = 'screen';
         ctx.fillStyle = `rgba(255, 255, 255, ${intensity * 0.3})`;
         ctx.fillRect(0, 0, width, height);
 
-        // Noise strips
         ctx.globalCompositeOperation = 'source-over';
         ctx.fillStyle = `rgba(255, 255, 255, ${intensity * 0.6})`;
         const numStrips = 8;
         for (let i = 0; i < numStrips; i++) {
-             // Random noise positions
              const stripH = Math.random() * 60 * intensity;
              const stripY = Math.random() * height;
              if (Math.random() > 0.5) {
@@ -450,21 +467,17 @@ export const MirrorCanvas: React.FC = () => {
              }
         }
         
-        // Confirmation Text
         if (intensity > 0.2) {
             ctx.font = 'bold 24px monospace';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.shadowBlur = 10 * intensity;
             ctx.shadowColor = 'rgba(255, 255, 255, 1)';
-            
-            // Randomly shift text color for glitch feel
             ctx.fillStyle = Math.random() > 0.5 ? params.primaryColor : '#FFFFFF';
             ctx.fillText('[ SYSTEM_SCRAMBLE ]', width/2, height/2);
         }
 
         ctx.restore();
-        // Decay the effect
         resetFlashRef.current *= 0.85;
     } else {
         resetFlashRef.current = 0;
@@ -474,26 +487,23 @@ export const MirrorCanvas: React.FC = () => {
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
     
-    // A. Static Horizontal Scanlines
     ctx.fillStyle = 'rgba(0, 0, 0, 0.15)'; 
     for (let y = 0; y < height; y += 4) {
         ctx.fillRect(0, y, width, 1);
     }
 
-    // B. Rolling "Refresh" Bar
-    const time = performance.now() * 0.0003; // speed
+    const time = performance.now() * 0.0003; 
     const barHeight = height * 0.25;
     const yPos = (time * height * 0.8) % (height + barHeight) - barHeight;
     
     const gradient = ctx.createLinearGradient(0, yPos, 0, yPos + barHeight);
     gradient.addColorStop(0, 'rgba(255, 255, 255, 0)');
-    gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.03)'); // Very subtle white
+    gradient.addColorStop(0.5, 'rgba(255, 255, 255, 0.03)'); 
     gradient.addColorStop(1, 'rgba(255, 255, 255, 0)');
     
     ctx.fillStyle = gradient;
     ctx.fillRect(0, yPos, width, barHeight);
 
-    // C. Vignette
     const rad = Math.min(width, height);
     const vignette = ctx.createRadialGradient(width/2, height/2, rad * 0.4, width/2, height/2, rad * 0.9);
     vignette.addColorStop(0, 'rgba(0,0,0,0)');
@@ -521,10 +531,11 @@ export const MirrorCanvas: React.FC = () => {
     <div ref={containerRef} className="relative w-full h-screen bg-black overflow-hidden cursor-none">
       <video
         ref={videoRef}
-        className="absolute top-0 left-0 opacity-0 pointer-events-none"
-        style={{ width: '1280px', height: '720px' }} 
+        autoPlay
         playsInline
         muted
+        className="absolute top-0 left-0 opacity-0 pointer-events-none"
+        style={{ width: '1280px', height: '720px' }} 
       />
       <canvas ref={canvasRef} className="block w-full h-full" />
       
@@ -553,8 +564,19 @@ export const MirrorCanvas: React.FC = () => {
         </div>
       )}
       {permissionError && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black z-50 text-red-500 font-mono">
-            ACCESS_DENIED // ENABLE_CAMERA
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-black z-50 text-red-500 font-mono p-4 text-center">
+            <div className="mb-4 text-xl">ACCESS_DENIED // {errorMsg || 'CAMERA_ERROR'}</div>
+            <div className="mb-6 text-sm text-gray-400 max-w-md border border-gray-800 p-4 bg-gray-900">
+                <p className="mb-2">1. Check browser address bar for blocked camera icon.</p>
+                <p className="mb-2">2. Allow camera access.</p>
+                <p>3. Click Retry below.</p>
+            </div>
+            <button 
+                onClick={() => startCamera()}
+                className="px-6 py-2 border border-red-500 hover:bg-red-500 hover:text-black transition-colors"
+            >
+                [ RETRY_CONNECTION ]
+            </button>
         </div>
       )}
     </div>
