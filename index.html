@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0" />
+    <title>Glitch Mirror</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      body { margin: 0; background-color: #000; overflow: hidden; }
+      canvas { display: block; }
+      /* Custom scrollbar for webkit */
+      ::-webkit-scrollbar { width: 0px; background: transparent; }
+      
+      @keyframes scanline {
+        0% { transform: translateY(-100%); }
+        100% { transform: translateY(100%); }
+      }
+      .scanline::after {
+        content: " ";
+        display: block;
+        position: absolute;
+        top: 0;
+        left: 0;
+        bottom: 0;
+        right: 0;
+        background: linear-gradient(to bottom, rgba(255,255,255,0), rgba(255,255,255,0) 50%, rgba(0,0,0,0.2) 50%, rgba(0,0,0,0.2));
+        background-size: 100% 4px;
+        pointer-events: none;
+        z-index: 50;
+      }
+    </style>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.2.1/",
+    "react": "https://aistudiocdn.com/react@^19.2.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.1/",
+    "@mediapipe/face_mesh": "https://aistudiocdn.com/@mediapipe/face_mesh@^0.4.1633559619",
+    "@mediapipe/camera_utils": "https://aistudiocdn.com/@mediapipe/camera_utils@^0.3.1675466862"
+  }
+}
+</script>
+</head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

@@ -1,0 +1,7 @@
+{
+  "name": "Glitch Eyes",
+  "description": "An interactive glitch-art mirror that remixes your eyes and face with time-delayed geometry and gaze-controlled parallax effects.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
